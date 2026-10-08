@@ -1,0 +1,34 @@
+[package]
+name = "token-meter"
+version = "0.1.0"
+description = "AI subscription usage to API-equivalent cost meter"
+edition = "2021"
+
+[lib]
+name = "token_meter_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rayon = "1"
+memchr = "2"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
