@@ -50,15 +50,45 @@ struct HistoryFile {
     desktop: Vec<DesktopSample>,
 }
 
-pub fn desktop_history_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Claude").join("plan-usage-history.json"))
+/// Claude デスクトップアプリの使用率履歴ファイルの候補。
+///
+/// Microsoft Store 版（MSIX）のデスクトップアプリは、`%APPDATA%` への書き込みが
+/// `%LOCALAPPDATA%\Packages\Claude_<発行元ID>\LocalCache\Roaming\` に振り替えられる。
+/// 通常起動した Token Meter からは `%APPDATA%\Claude` に見えないので、両方を探す。
+pub fn desktop_history_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        if let Ok(rd) = std::fs::read_dir(PathBuf::from(local).join("Packages")) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("Claude_") {
+                    out.push(e.path().join("LocalCache").join("Roaming").join("Claude").join("plan-usage-history.json"));
+                }
+            }
+        }
+    }
+    if let Some(a) = std::env::var_os("APPDATA") {
+        out.push(PathBuf::from(a).join("Claude").join("plan-usage-history.json"));
+    }
+    out
+}
+
+fn mtime_of(path: &Path) -> Option<i64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as i64)
 }
 
 /// Claude デスクトップアプリの使用率履歴を読み込み、アプリ側にも蓄積する。
 pub struct LimitHistory {
     store_path: PathBuf,
     pub desktop: Vec<DesktopSample>,
-    source_mtime: i64,
+    /// 読み込んだ元ファイルとその更新日時
+    source_mtimes: HashMap<PathBuf, i64>,
 }
 
 impl LimitHistory {
@@ -72,40 +102,39 @@ impl LimitHistory {
         LimitHistory {
             store_path,
             desktop,
-            source_mtime: 0,
+            source_mtimes: HashMap::new(),
         }
     }
 
-    /// 元ファイルが更新されていれば取り込む。
+    /// 見つかった元ファイルのうち、更新されたものを取り込む。
     pub fn refresh(&mut self, settings: &Settings) {
         if !settings.claude_desktop_usage {
             return;
         }
-        let Some(path) = desktop_history_path() else { return };
-        let Ok(meta) = std::fs::metadata(&path) else { return };
-        let mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        if mtime == self.source_mtime {
+        let mut incoming = Vec::new();
+        for path in desktop_history_paths() {
+            let Some(mtime) = mtime_of(&path) else { continue };
+            if self.source_mtimes.get(&path) == Some(&mtime) {
+                continue;
+            }
+            self.source_mtimes.insert(path.clone(), mtime);
+            if let Some(file) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<DesktopFile>(&s).ok())
+            {
+                incoming.extend(file.samples);
+            }
+        }
+        if incoming.is_empty() {
             return;
         }
-        self.source_mtime = mtime;
-        let Some(file) = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<DesktopFile>(&s).ok())
-        else {
-            return;
-        };
         let mut by_t: BTreeMap<(i64, Option<String>), DesktopSample> = self
             .desktop
             .drain(..)
             .map(|s| ((s.t, s.org.clone()), s))
             .collect();
         let before = by_t.len();
-        for s in file.samples {
+        for s in incoming {
             by_t.insert((s.t, s.org.clone()), s);
         }
         self.desktop = by_t.into_values().collect();
@@ -117,6 +146,13 @@ impl LimitHistory {
                 let _ = write_atomic(&self.store_path, &json);
             }
         }
+    }
+
+    /// 実際に見つかった元ファイル
+    pub fn found_paths(&self) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = self.source_mtimes.keys().cloned().collect();
+        v.sort();
+        v
     }
 }
 
@@ -501,11 +537,14 @@ pub fn report(store: &Store, book: &PriceBook, settings: &Settings, history: &Li
             .or_insert_with(|| cost_index(store, book, settings, b.service, b.model.as_deref()));
         series.push(analyze(b, idx, now));
     }
-    let path = desktop_history_path();
+    let found = history.found_paths();
     LimitReport {
         series,
-        desktop_exists: path.as_ref().map(|p| p.is_file()).unwrap_or(false),
-        desktop_path: path.map(|p| p.to_string_lossy().to_string()),
+        desktop_exists: !found.is_empty(),
+        desktop_path: found
+            .first()
+            .or(desktop_history_paths().first())
+            .map(|p| p.to_string_lossy().to_string()),
         desktop_samples: history.desktop.len(),
         desktop_last_ts: history.desktop.last().map(|s| s.t),
         codex_samples: store.rate_samples.len(),

@@ -86,7 +86,9 @@ cargo test --release --lib real_data -- --ignored --nocapture # 実際のロー�
 ## 使用上限（%）との比較
 
 - 使用率の取得元は 3 つ。
-  - **Claude**: デスクトップアプリが書く `%APPDATA%\Claude\plan-usage-history.json`
+  - **Claude**: デスクトップアプリが書く `plan-usage-history.json`。Microsoft Store 版（MSIX）では
+    `%LOCALAPPDATA%\Packages\Claude_<発行元ID>\LocalCache\Roaming\Claude\` にあり、
+    通常版では `%APPDATA%\Claude\` にあるので両方を探す（`desktop_history_paths`）
     （非公開の形式。`{version: 2, samples: [{t, org, u: {fh, sd}}]}`、`fh` = 5 時間枠 %、
     `sd` = 7 日枠 %）。アプリを開いている間しか記録されず、古いものから消えるので、読み込んだ分を
     アプリ側の `limit-history.json` に蓄積する。複数アカウントが混ざらないよう最新サンプルの `org` だけ使う。
@@ -138,6 +140,11 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333 npm run app:d
 `Page.captureScreenshot` が使えます。
 
 ## 環境についての注意
+
+- **Claude デスクトップアプリ（MSIX）の中で動くエージェントへ:** シェルなどの子プロセスはアプリの
+  コンテナ内で動くため、`%APPDATA%` の読み書きが `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\`
+  に振り替えられる。開発版のアプリやテストが書く設定・キャッシュはユーザーが普段起動するアプリとは別の
+  場所になり、逆にユーザーの実際の設定は見えない。ユーザー環境の挙動を確かめるときはこの点に注意する。
 
 - Windows 11 です。**スマートアプリコントロール**が有効だと、署名のないバイナリ（Rust の
   ツールチェーン、ビルドスクリプト、ビルドした exe）がブロックされます。開発機ではオフに
