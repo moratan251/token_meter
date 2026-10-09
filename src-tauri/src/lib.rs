@@ -277,19 +277,28 @@ mod real_data {
         println!("limits: desktop {} samples, codex {} samples", rep.desktop_samples, rep.codex_samples);
         for s in &rep.series {
             println!(
-                "  {} {:<10} latest {:?}% per1% {:?} (Δ{:.0}pt / {} intervals, ${:.2}) window_cost {:?} windows {}",
+                "  {} {:<10} latest {:?}% per1% {:?} raw {:?} (Δ{:.0}pt + other {:.0}pt / {} intervals, ${:.2}) window_cost {:?} windows {}",
                 s.service,
                 s.kind,
                 s.latest.as_ref().map(|p| p.percent),
                 s.usd_per_percent.map(|v| format!("{v:.2} ({})", s.basis)),
+                s.raw_usd_per_percent.map(|v| format!("{v:.2}")),
                 s.basis_points,
+                s.other_points,
                 s.basis_intervals,
                 s.basis_cost,
                 s.current_cost.map(|v| v.round()),
                 s.windows.len()
             );
             for w in s.windows.iter().take(4) {
-                println!("      window start {:?} max {:.0}% cost {:?}", w.start, w.max_percent, w.cost.map(|v| v.round()));
+                println!(
+                    "      window start {:?} max {:.0}% other {:.0}% cost {:?} per1% {:?}",
+                    w.start,
+                    w.max_percent,
+                    w.other_percent,
+                    w.cost.map(|v| v.round()),
+                    w.usd_per_percent.map(|v| (v * 100.0).round() / 100.0)
+                );
             }
         }
     }

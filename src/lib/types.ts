@@ -238,7 +238,9 @@ export interface LimitWindow {
   end: number | null;
   max_percent: number;
   cost: number | null;
+  other_percent: number;
   usd_per_percent: number | null;
+  raw_usd_per_percent: number | null;
   last_ts: number;
 }
 
@@ -251,9 +253,12 @@ export interface LimitSeries {
   latest: LimitPoint | null;
   latest_resets_at: number | null;
   usd_per_percent: number | null;
+  raw_usd_per_percent: number | null;
   basis: "current" | "recent_window" | "average";
   avg_usd_per_percent: number | null;
+  raw_avg_usd_per_percent: number | null;
   basis_points: number;
+  other_points: number;
   basis_intervals: number;
   basis_cost: number;
   current_start: number | null;

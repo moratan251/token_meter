@@ -10,6 +10,10 @@
 //! 推定方法: 同じ枠の中で使用率が上がった区間ごとに「増えた使用率」と「その区間の API 換算額」を
 //! 集計し、合計の比から 1% あたりの API 換算額を求める。リセット時刻が分からなくても使え、
 //! 整数に丸められた使用率でも区間を重ねるほど誤差が小さくなる。
+//!
+//! 使用率にはチャットや他の端末での利用も含まれる。ログに Code の記録が 1 件もない区間で
+//! 使用率が上がった分は「Code 以外の利用」として分母から除く。同じ区間に Code とチャットの
+//! 両方がある場合は分けられないので、1% あたりの額はまだ少し低めに出ることがある。
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -29,6 +33,10 @@ const DAY: i64 = 86_400_000;
 const ESTIMATE_DAYS: i64 = 30;
 /// グラフに出す期間
 const CHART_DAYS: i64 = 21;
+/// 使用率への反映の遅れ。区間の開始よりこれだけ前の Code の利用も、その区間の増加の原因とみなす。
+const LAG_BEFORE: i64 = 10 * MIN;
+/// ログの記録時刻と使用率の記録時刻のずれの許容幅
+const LAG_AFTER: i64 = 2 * MIN;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DesktopSample {
@@ -265,6 +273,11 @@ impl CostIndex {
             self.upto(b) - self.upto(a)
         }
     }
+
+    /// a < ts <= b に記録が 1 件でもあるか（価格が未設定で 0 円の記録も数える）
+    fn any(&self, a: i64, b: i64) -> bool {
+        b > a && self.ts.partition_point(|x| *x <= b) > self.ts.partition_point(|x| *x <= a)
+    }
 }
 
 fn cost_index(store: &Store, book: &PriceBook, settings: &Settings, service: Service, model: Option<&str>) -> CostIndex {
@@ -304,8 +317,12 @@ pub struct LimitWindow {
     pub max_percent: f64,
     /// 枠の開始から最後の記録までの API 換算額（開始時刻が分かる場合）
     pub cost: Option<f64>,
-    /// この枠の実績から求めた 1% あたりの額（使用率 3% 以上のとき）
+    /// Code の記録がない区間で増えた使用率（チャットや他の端末での利用の推定）
+    pub other_percent: f64,
+    /// この枠の実績から求めた、Code 以外の利用を除いた 1% あたりの額（残りが 3% 以上のとき）
     pub usd_per_percent: Option<f64>,
+    /// 使用率全体で割った 1% あたりの額（Code 以外の利用を含む）
+    pub raw_usd_per_percent: Option<f64>,
     pub last_ts: i64,
 }
 
@@ -318,14 +335,20 @@ pub struct LimitSeries {
     pub sources: Vec<&'static str>,
     pub latest: Option<LimitPoint>,
     pub latest_resets_at: Option<i64>,
-    /// 1 ポイント（1%）あたりの API 換算額（USD）。`basis` の方法で求めた値。
+    /// 1 ポイント（1%）あたりの API 換算額（USD）。Code 以外の利用を除き、`basis` の方法で求めた値。
     pub usd_per_percent: Option<f64>,
+    /// 同じ方法で、使用率全体（Code 以外の利用を含む）で割った値
+    pub raw_usd_per_percent: Option<f64>,
     /// "current"（今の枠）| "recent_window"（直近の枠）| "average"（期間平均）
     pub basis: &'static str,
-    /// 直近 30 日の、使用率が上がった区間から求めた平均（参考値）
+    /// 直近 30 日の、使用率が上がった区間から求めた平均（Code 以外の利用を除く。参考値）
     pub avg_usd_per_percent: Option<f64>,
-    /// 推定に使った使用率の増加量の合計（ポイント）
+    /// 同じ期間の、Code 以外の利用を含めた平均
+    pub raw_avg_usd_per_percent: Option<f64>,
+    /// 推定に使った使用率の増加量の合計（ポイント。Code 以外の利用を除く）
     pub basis_points: f64,
+    /// 同じ期間に、Code の記録がない区間で増えた使用率の合計
+    pub other_points: f64,
     pub basis_intervals: usize,
     pub basis_cost: f64,
     pub current_start: Option<i64>,
@@ -348,6 +371,22 @@ pub struct LimitReport {
     pub manual_samples: usize,
 }
 
+/// 使用率が前の最高値を超えた区間（`ts` は区間の終わり）。`other` はそのうち Code 以外の利用とみなした分。
+#[derive(Clone, Copy, Debug)]
+struct Rise {
+    ts: i64,
+    dp: f64,
+    other: f64,
+}
+
+/// (t0, t1] に終わる細かい区間の、Code 以外の利用の割合。区間がなければ `None`。
+fn other_share(fine: &[Rise], t0: i64, t1: i64) -> Option<f64> {
+    let a = fine.partition_point(|r| r.ts <= t0);
+    let b = fine.partition_point(|r| r.ts <= t1);
+    let (dp, other) = fine[a..b].iter().fold((0.0, 0.0), |(d, o), r| (d + r.dp, o + r.other));
+    (dp > 0.0).then(|| other / dp)
+}
+
 struct Win {
     start: Option<i64>,
     resets_at: Option<i64>,
@@ -355,7 +394,9 @@ struct Win {
     idx: Vec<usize>,
 }
 
-fn analyze(b: SeriesBuild, cost: &CostIndex, now: i64) -> LimitSeries {
+/// `fine` は同じサービスの短い枠（5 時間枠）の区間。長い枠は 1% 上がるまでに Code とチャットが
+/// 混ざりやすいので、同じ時間帯の短い枠の内訳で按分する。
+fn analyze(b: SeriesBuild, cost: &CostIndex, now: i64, fine: Option<&[Rise]>) -> (LimitSeries, Vec<Rise>) {
     let window_ms = b.window_minutes as i64 * MIN;
     let mut pts = b.pts;
     pts.sort_by_key(|p| p.ts);
@@ -402,19 +443,42 @@ fn analyze(b: SeriesBuild, cost: &CostIndex, now: i64) -> LimitSeries {
     }
 
     // 1% あたりの額: 使用率が前の最高値を超えた区間ごとに、増加量と API 換算額を合計する。
+    // 区間内（反映の遅れを含む）に Code の記録が 1 件もなければ、その増加は Code 以外の利用とみなす。
     let since = now - ESTIMATE_DAYS * DAY;
-    let (mut sum_p, mut sum_c, mut n) = (0.0, 0.0, 0usize);
-    for w in &wins {
+    let (mut sum_p, mut sum_c, mut sum_other, mut n) = (0.0, 0.0, 0.0, 0usize);
+    let mut win_other = vec![0.0; wins.len()];
+    let mut rises: Vec<Rise> = Vec::new();
+    for (wi, w) in wins.iter().enumerate() {
         let mut hw: Option<(i64, f64)> = w.start.map(|s| (s, 0.0));
+        let mut prev_ts = w.start;
         for &i in &w.idx {
             let p = &pts[i];
+            let prev = prev_ts.replace(p.ts);
             match hw {
                 None => hw = Some((p.ts, p.percent)),
                 Some((t0, p0)) if p.percent > p0 => {
+                    let dp = p.percent - p0;
+                    let other = match fine.and_then(|f| other_share(f, t0, p.ts)) {
+                        Some(r) => dp * r,
+                        None => {
+                            // 反映の遅れは、増加が見えた直前の記録の少し前までさかのぼって見る。
+                            let lo = prev.map(|t| t - LAG_BEFORE).unwrap_or(t0).min(t0);
+                            if cost.any(lo, p.ts + LAG_AFTER) {
+                                0.0
+                            } else {
+                                dp
+                            }
+                        }
+                    };
+                    rises.push(Rise { ts: p.ts, dp, other });
+                    win_other[wi] += other;
                     if p.ts >= since && p.ts - t0 <= window_ms {
-                        sum_p += p.percent - p0;
+                        sum_p += dp - other;
+                        sum_other += other;
                         sum_c += cost.between(t0, p.ts);
-                        n += 1;
+                        if dp > other {
+                            n += 1;
+                        }
                     }
                     hw = Some((p.ts, p.percent));
                 }
@@ -423,6 +487,7 @@ fn analyze(b: SeriesBuild, cost: &CostIndex, now: i64) -> LimitSeries {
         }
     }
     let avg_usd_per_percent = if sum_p >= 3.0 && sum_c > 0.0 { Some(sum_c / sum_p) } else { None };
+    let raw_avg_usd_per_percent = if sum_p + sum_other >= 3.0 && sum_c > 0.0 { Some(sum_c / (sum_p + sum_other)) } else { None };
 
     let window_of: HashMap<usize, usize> = wins
         .iter()
@@ -453,6 +518,8 @@ fn analyze(b: SeriesBuild, cost: &CostIndex, now: i64) -> LimitSeries {
             // 開始時刻を遅めに推定した枠が次の枠と重ならないよう、次の枠の開始で打ち切る。
             let next_start = wins.get(wi + 1).and_then(|n| n.start.or(Some(pts[n.idx[0]].ts)));
             let end = w.start.map(|s| s + window_ms).or(w.resets_at);
+            let other = win_other[wi].min(w.high);
+            let code_percent = w.high - other;
             LimitWindow {
                 start: w.start,
                 end: match (end, next_start) {
@@ -461,7 +528,9 @@ fn analyze(b: SeriesBuild, cost: &CostIndex, now: i64) -> LimitSeries {
                 },
                 max_percent: w.high,
                 cost,
-                usd_per_percent: cost.filter(|c| *c > 0.0 && w.high >= 3.0).map(|c| c / w.high),
+                other_percent: other,
+                usd_per_percent: cost.filter(|c| *c > 0.0 && code_percent >= 3.0).map(|c| c / code_percent),
+                raw_usd_per_percent: cost.filter(|c| *c > 0.0 && w.high >= 3.0).map(|c| c / w.high),
                 last_ts,
             }
         })
@@ -483,21 +552,25 @@ fn analyze(b: SeriesBuild, cost: &CostIndex, now: i64) -> LimitSeries {
     };
 
     // 基本の推定値: 今の枠 → 直近の枠 → 期間平均 の順に、使えるものを採る。
-    // 過去の枠は、使用率が小さいほど丸め誤差が効くので 10% 以上の枠を優先する。
+    // 過去の枠は、使用率が小さいほど丸め誤差が効くので Code の分が 10% 以上の枠を優先する。
     let past = || windows.iter().skip(if current_active { 1 } else { 0 }).filter(|w| w.usd_per_percent.is_some() && w.last_ts >= since);
-    let (usd_per_percent, basis) = match (current_active, windows.first()) {
-        (true, Some(w)) if w.usd_per_percent.is_some() => (w.usd_per_percent, "current"),
-        _ => match past().find(|w| w.max_percent >= 10.0).or_else(|| past().next()) {
-            Some(w) => (w.usd_per_percent, "recent_window"),
-            None => (avg_usd_per_percent, "average"),
-        },
+    let chosen = match (current_active, windows.first()) {
+        (true, Some(w)) if w.usd_per_percent.is_some() => Some((w, "current")),
+        _ => past()
+            .find(|w| w.max_percent - w.other_percent >= 10.0)
+            .or_else(|| past().next())
+            .map(|w| (w, "recent_window")),
+    };
+    let (usd_per_percent, raw_usd_per_percent, basis) = match chosen {
+        Some((w, basis)) => (w.usd_per_percent, w.raw_usd_per_percent, basis),
+        None => (avg_usd_per_percent, raw_avg_usd_per_percent, "average"),
     };
 
     let mut sources: Vec<&'static str> = pts.iter().map(|p| p.source).collect();
     sources.sort();
     sources.dedup();
 
-    LimitSeries {
+    let series = LimitSeries {
         service: b.service.id().to_string(),
         kind: b.kind,
         model: b.model,
@@ -511,9 +584,12 @@ fn analyze(b: SeriesBuild, cost: &CostIndex, now: i64) -> LimitSeries {
         }),
         latest_resets_at,
         usd_per_percent: usd_per_percent.or(avg_usd_per_percent),
+        raw_usd_per_percent: if usd_per_percent.is_some() { raw_usd_per_percent } else { raw_avg_usd_per_percent },
         basis: if usd_per_percent.is_some() { basis } else { "average" },
         avg_usd_per_percent,
+        raw_avg_usd_per_percent,
         basis_points: sum_p,
+        other_points: sum_other,
         basis_intervals: n,
         basis_cost: sum_c,
         current_start,
@@ -522,20 +598,33 @@ fn analyze(b: SeriesBuild, cost: &CostIndex, now: i64) -> LimitSeries {
         current_active,
         points,
         windows,
-    }
+    };
+    (series, rises)
 }
 
 pub fn report(store: &Store, book: &PriceBook, settings: &Settings, history: &LimitHistory) -> LimitReport {
     let now = chrono::Utc::now().timestamp_millis();
     let builds = collect(store, history, settings);
     let mut indexes: HashMap<(Service, Option<String>), CostIndex> = HashMap::new();
+    // 5 時間枠を先に分析し、その区間の内訳を同じサービスの長い枠の按分に使う。
+    let mut builds = builds;
+    builds.sort_by_key(|b| !b.kind.ends_with("session"));
+    let mut fine: HashMap<(Service, String), Vec<Rise>> = HashMap::new();
     let mut series = Vec::new();
     for b in builds {
         let key = (b.service, b.model.clone());
         let idx = indexes
             .entry(key)
             .or_insert_with(|| cost_index(store, book, settings, b.service, b.model.as_deref()));
-        series.push(analyze(b, idx, now));
+        let (group, kind) = b.kind.rsplit_once(':').map(|(g, k)| (g.to_string(), k)).unwrap_or((String::new(), b.kind.as_str()));
+        let service = b.service;
+        if kind == "session" {
+            let (s, rises) = analyze(b, idx, now, None);
+            fine.insert((service, group), rises);
+            series.push(s);
+        } else {
+            series.push(analyze(b, idx, now, fine.get(&(service, group)).map(|v| v.as_slice())).0);
+        }
     }
     let found = history.found_paths();
     LimitReport {
@@ -579,7 +668,7 @@ mod tests {
         };
         let mut pts: Vec<(i64, f64)> = (0..10).map(|i| (i * h, 40.0 + i as f64)).collect();
         pts.extend((10..20).map(|i| (i * h, (i - 10) as f64)));
-        let s = analyze(build(&pts), &cost, 20 * h);
+        let s = analyze(build(&pts), &cost, 20 * h, None).0;
         let per = s.usd_per_percent.unwrap();
         assert!((per - 2.0).abs() < 0.25, "per={per}");
         // リセット後の枠は 0% から始まるので開始時刻が分かる。
@@ -592,8 +681,52 @@ mod tests {
         let h = 60 * MIN;
         let cost = CostIndex { ts: vec![h - 1, 2 * h - 1, 3 * h - 1], cum: vec![1.0, 2.0, 3.0] };
         // 並行セッションの古い値（10.5）が混ざっても二重に数えない。
-        let s = analyze(build(&[(0, 10.0), (h, 11.0), (h + 1, 10.5), (2 * h, 12.0), (3 * h, 13.0)]), &cost, 4 * h);
+        let s = analyze(build(&[(0, 10.0), (h, 11.0), (h + 1, 10.5), (2 * h, 12.0), (3 * h, 13.0)]), &cost, 4 * h, None).0;
         assert!((s.basis_points - 3.0).abs() < 1e-9);
         assert!((s.usd_per_percent.unwrap() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn excludes_increases_without_code_usage() {
+        // 1〜5 時間目は Code で $2 使うごとに 1% 増え、6 時間目は何もせず、
+        // 7〜9 時間目は Code の記録がないまま 2% ずつ増える（チャット）。
+        let h = 60 * MIN;
+        let cost = CostIndex {
+            ts: (1..=5).map(|i| i * h - 1).collect(),
+            cum: (1..=5).map(|i| i as f64 * 2.0).collect(),
+        };
+        let mut pts: Vec<(i64, f64)> = (0..=6).map(|i| (i * h, i.min(5) as f64)).collect();
+        pts.extend((7..=9).map(|i| (i * h, 5.0 + (i - 6) as f64 * 2.0)));
+        let s = analyze(build(&pts), &cost, 10 * h, None).0;
+        assert!((s.basis_points - 5.0).abs() < 1e-9, "code={}", s.basis_points);
+        assert!((s.other_points - 6.0).abs() < 1e-9, "other={}", s.other_points);
+        assert!((s.avg_usd_per_percent.unwrap() - 2.0).abs() < 1e-9);
+        assert!((s.raw_avg_usd_per_percent.unwrap() - 10.0 / 11.0).abs() < 1e-9);
+        assert!((s.windows[0].other_percent - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn splits_long_window_by_short_window_breakdown() {
+        // 週間枠が 0% → 2% に上がる間に、5 時間枠では Code 分 1 ポイント、Code 以外 3 ポイント増えた。
+        let h = 60 * MIN;
+        let cost = CostIndex { ts: vec![h - 1], cum: vec![5.0] };
+        let fine = [
+            Rise { ts: h, dp: 1.0, other: 0.0 },
+            Rise { ts: 2 * h, dp: 3.0, other: 3.0 },
+        ];
+        let (s, _) = analyze(build(&[(0, 0.0), (2 * h, 2.0)]), &cost, 3 * h, Some(&fine));
+        assert!((s.other_points - 1.5).abs() < 1e-9, "other={}", s.other_points);
+        assert!((s.basis_points - 0.5).abs() < 1e-9);
+        assert!((s.windows[0].other_percent - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn attributes_delayed_increase_to_code() {
+        // Code の利用が使用率に反映されるのが次の記録まで遅れても、Code 以外とはみなさない。
+        let q = 15 * MIN;
+        let cost = CostIndex { ts: vec![q - MIN, 2 * q - MIN], cum: vec![3.0, 6.0] };
+        let s = analyze(build(&[(0, 0.0), (q, 0.0), (2 * q, 1.0), (3 * q, 2.0)]), &cost, 4 * q, None).0;
+        assert!(s.other_points.abs() < 1e-9, "other={}", s.other_points);
+        assert!((s.basis_points - 2.0).abs() < 1e-9);
     }
 }

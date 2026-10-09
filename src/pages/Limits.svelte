@@ -37,11 +37,7 @@
     average: "過去30日の平均",
   };
 
-  /** その枠で使った API 換算額が、Claude Code / Codex だけで使った場合に何 % に当たるか。 */
-  function reference(s: LimitSeries): number | null {
-    const vals = s.windows.filter((w) => w.usd_per_percent != null && w.max_percent >= 10).map((w) => w.usd_per_percent!);
-    return vals.length ? Math.max(...vals) : s.usd_per_percent;
-  }
+  const pct = (v: number) => `${v.toFixed(1).replace(/\.0$/, "")}%`;
 
   /** 月額（このサービスで今有効なプラン） */
   function monthlyFee(service: ServiceId): { amount: number; name: string } | null {
@@ -215,14 +211,15 @@
   <h1>使用上限との比較</h1>
   <p class="muted lead">
     サブスクの使用上限（%）と、同じ期間に使った分の API 換算額を並べて、「1% が API 換算でいくら分か」「上限まで使うといくら分か」を推定します。
-    使用率にはチャットや他の端末での利用も含まれますが、API 換算額はこの PC の Claude Code / Codex のログだけから計算するため、Code 以外の利用が多い期間は 1% あたりの額が低めに出ます。
+    使用率にはチャットや他の端末での利用も含まれますが、API 換算額はこの PC の Claude Code / Codex のログだけから計算します。
+    そのため、ログに記録がない時間帯に増えた使用率は「Code 以外の利用」とみなして除いています。同じ時間帯に Code とチャットを併用した分は分けられないため、1% あたりの額はまだ少し低めに出ることがあります。
   </p>
 
   {#if report}
     {#each sortedSeries as s (s.service + s.kind + (s.model ?? ""))}
       {@const p = s.latest}
       {@const per = s.usd_per_percent}
-      {@const ref = reference(s)}
+      {@const cur = s.current_active ? s.windows[0] : null}
       {@const fee = monthlyFee(s.service)}
       {@const weekly = s.window_minutes === 10080}
       <section class="card series">
@@ -245,6 +242,9 @@
             <div class="muted tiny">
               {#if s.current_active && s.current_end}リセット: {durationText(s.current_end - Date.now())}{:else if p && !s.current_active}最後の記録は {p.percent}%{/if}
             </div>
+            {#if cur && cur.other_percent > 0}
+              <div class="muted tiny">うち Code 以外の利用 約 {pct(cur.other_percent)}</div>
+            {/if}
           </div>
           <div>
             <div class="muted tiny">この枠の API 換算額</div>
@@ -254,7 +254,10 @@
           <div>
             <div class="muted tiny">1% あたり</div>
             <div class="big">{per != null ? money(per, m) : "—"}</div>
-            <div class="muted tiny">{per != null ? BASIS[s.basis] + "から推定" : "データ不足"}</div>
+            <div class="muted tiny">{per != null ? `Code 以外を除き、${BASIS[s.basis]}から推定` : "データ不足"}</div>
+            {#if per != null && s.raw_usd_per_percent != null && s.raw_usd_per_percent < per * 0.995}
+              <div class="muted tiny">除かない場合 {money(s.raw_usd_per_percent, m)}</div>
+            {/if}
           </div>
           <div>
             <div class="muted tiny">上限（100%）まで使うと</div>
@@ -286,30 +289,30 @@
                 <tr>
                   <th>期間</th>
                   <th class="r">最大使用率</th>
+                  <th class="r" title="ログに {SERVICE_LABEL[s.service]} の記録がない時間帯に増えた使用率">うち Code 以外（推定）</th>
                   <th class="r">API換算（{SERVICE_LABEL[s.service]}）</th>
-                  <th class="r">1% あたり</th>
+                  <th class="r" title="API 換算額を、Code 以外の利用を除いた使用率で割った額">1% あたり</th>
                   <th class="r">100% 換算</th>
-                  <th class="r" title="この枠の API 換算額を、最も効率よく測れた枠の 1% あたりの額で割った残り">Code 以外の利用（推定）</th>
                 </tr>
               </thead>
               <tbody>
                 {#each s.windows as w}
-                  {@const other = ref && w.cost != null ? Math.max(0, w.max_percent - w.cost / ref) : null}
                   <tr>
                     <td>{w.start ? dateTime(w.start) : "開始不明"} 〜 {w.end ? dateTime(w.end) : "?"}</td>
-                    <td class="r">{w.max_percent.toFixed(0)}%</td>
+                    <td class="r">{pct(w.max_percent)}</td>
+                    <td class="r">{w.other_percent > 0 ? pct(w.other_percent) : "—"}</td>
                     <td class="r">{w.cost != null ? money(w.cost, m) : "—"}</td>
                     <td class="r">{w.usd_per_percent != null ? money(w.usd_per_percent, m) : "—"}</td>
                     <td class="r">{w.usd_per_percent != null ? money(w.usd_per_percent * 100, m) : "—"}</td>
-                    <td class="r">{other != null ? `${other.toFixed(0)}%（≈ ${money(other * ref!, m)}）` : "—"}</td>
                   </tr>
                 {/each}
               </tbody>
             </table>
             <p class="muted tiny">
               過去30日の平均: {s.avg_usd_per_percent != null ? `1% ≈ ${money(s.avg_usd_per_percent, m)}` : "—"}
-              （使用率が上がった {s.basis_intervals} 区間・合計 {s.basis_points.toFixed(0)} ポイントから算出）。
-              「Code 以外の利用」は、1% あたりの額が最も高かった枠（≒ ほぼ {SERVICE_LABEL[s.service]} だけで使った枠）を基準にした推定です。
+              （Code を使っていた {s.basis_intervals} 区間・合計 {s.basis_points.toFixed(0)} ポイントから算出。
+              Code 以外の利用 {s.other_points.toFixed(0)} ポイントを除外{s.raw_avg_usd_per_percent != null ? `、除かない場合は 1% ≈ ${money(s.raw_avg_usd_per_percent, m)}` : ""}）。
+              「Code 以外」は、ログに {SERVICE_LABEL[s.service]} の記録がない時間帯（反映の遅れとして直前の約 10 分を含む）に増えた使用率です。
             </p>
           </details>
         {/if}
