@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from "svelte";
   import Chart from "../components/Chart.svelte";
+  import ManualLimitList from "../components/ManualLimitList.svelte";
   import { api } from "../lib/api";
   import { app, money as moneyCtx, saveSettings, toast } from "../lib/state.svelte";
   import { SERVICE_LABEL, convert, dateTime, money, moneyAxis, moneyIn, ratio, relative, toDisplay } from "../lib/format";
@@ -188,17 +189,19 @@
     toast(`${added.length} 件の使用率を記録しました`);
   }
 
-  async function removeManual(id: string) {
-    if (!app.settings) return;
-    await saveSettings({ ...app.settings, manual_limits: app.settings.manual_limits.filter((x) => x.id !== id) });
-  }
-
   async function toggleDesktop(v: boolean) {
     if (!app.settings) return;
     await saveSettings({ ...app.settings, claude_desktop_usage: v });
   }
 
   const manual = $derived([...(app.settings?.manual_limits ?? [])].sort((a, b) => b.ts - a.ts));
+
+  /** その枠に属する手動記録 */
+  function manualOf(s: LimitSeries): ManualLimit[] {
+    return manual.filter(
+      (x) => x.service === s.service && x.kind === s.kind && (x.model ?? null) === (s.model ?? null),
+    );
+  }
 
   // 各カードの「今の値を記録」欄の入力値（系列ごと）
   type Quick = { percent: number | null; days: number | null; hours: number | null; minutes: number | null };
@@ -335,6 +338,13 @@
             <button class="btn small primary" onclick={() => saveQuick(s)} disabled={q.percent == null}>記録</button>
             <span class="muted tiny">リセットまでの時間は空欄でも記録できます（入れると枠の開始時刻が正確になります）</span>
           </div>
+          {@const own = manualOf(s)}
+          {#if own.length > 0}
+            <details class="own">
+              <summary>この枠の手動記録（{own.length} 件）</summary>
+              <ManualLimitList records={own} />
+            </details>
+          {/if}
         {/if}
 
         {#if s.points.length > 1}
@@ -427,22 +437,8 @@
 
     {#if manual.length > 0}
       <details class="manual">
-        <summary>手動で記録した使用率（{manual.length} 件）</summary>
-        <table class="data">
-          <thead><tr><th>記録日時</th><th>サービス</th><th>枠</th><th class="r">使用率</th><th>リセット</th><th></th></tr></thead>
-          <tbody>
-            {#each manual as x (x.id)}
-              <tr>
-                <td>{dateTime(x.ts)}</td>
-                <td>{SERVICE_LABEL[x.service]}</td>
-                <td>{kindLabel({ kind: x.kind, model: x.model, window_minutes: x.kind === "session" ? 300 : 10080 })}</td>
-                <td class="r">{x.percent}%</td>
-                <td>{x.resets_at ? dateTime(x.resets_at) : "—"}</td>
-                <td class="r"><button class="btn small ghost danger" onclick={() => removeManual(x.id)}>削除</button></td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+        <summary>手動で記録した使用率（すべて・{manual.length} 件）</summary>
+        <ManualLimitList records={manual} showKind />
       </details>
     {/if}
   </section>
@@ -496,6 +492,9 @@
   }
   .tiny {
     font-size: 11.5px;
+  }
+  .own {
+    margin: -2px 0 10px;
   }
   .quick {
     display: flex;
