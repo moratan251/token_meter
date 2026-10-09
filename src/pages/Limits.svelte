@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import Chart from "../components/Chart.svelte";
   import { api } from "../lib/api";
   import { app, money as moneyCtx, saveSettings, toast } from "../lib/state.svelte";
@@ -199,6 +200,50 @@
 
   const manual = $derived([...(app.settings?.manual_limits ?? [])].sort((a, b) => b.ts - a.ts));
 
+  // 各カードの「今の値を記録」欄の入力値（系列ごと）
+  type Quick = { percent: number | null; days: number | null; hours: number | null; minutes: number | null };
+  let quick = $state<Record<string, Quick>>({});
+
+  const seriesKey = (s: LimitSeries) => `${s.service}|${s.kind}|${s.model ?? ""}`;
+
+  /** 手動記録で表せる枠だけ欄を出す（Codex の独自の枠などは除く）。 */
+  function quickKind(s: LimitSeries): LimitKind | null {
+    return s.kind === "session" || s.kind === "weekly" || s.kind === "weekly_model" ? s.kind : null;
+  }
+
+  // 描画中に状態を書き換えられないので、系列が増えたときに入力欄の初期値を用意しておく。
+  $effect(() => {
+    const keys = (report?.series ?? []).map(seriesKey);
+    untrack(() => {
+      for (const k of keys) if (!quick[k]) quick[k] = { percent: null, days: null, hours: null, minutes: null };
+    });
+  });
+
+  async function saveQuick(s: LimitSeries) {
+    const kind = quickKind(s);
+    const q = quick[seriesKey(s)];
+    if (!app.settings || !kind || !q || q.percent == null) return;
+    if (!(q.percent >= 0 && q.percent <= 100)) {
+      toast("使用率は 0〜100 で入力してください", "error");
+      return;
+    }
+    const now = Date.now();
+    const hasReset = q.days != null || q.hours != null || q.minutes != null;
+    const mins = (q.days ?? 0) * 1440 + (q.hours ?? 0) * 60 + (q.minutes ?? 0);
+    const rec: ManualLimit = {
+      id: crypto.randomUUID(),
+      service: s.service,
+      kind,
+      model: kind === "weekly_model" ? s.model : null,
+      percent: Number(q.percent),
+      ts: now,
+      resets_at: hasReset ? now + mins * 60000 : null,
+    };
+    await saveSettings({ ...app.settings, manual_limits: [...app.settings.manual_limits, rec] });
+    quick[seriesKey(s)] = { percent: null, days: null, hours: null, minutes: null };
+    toast(`${kindLabel(s)} を ${pct(rec.percent)} で記録しました`);
+  }
+
   // 進行中の枠を先に、古いまま更新されていない枠（解約済みプランなど）を後ろに並べる。
   const sortedSeries = $derived(
     [...(report?.series ?? [])].sort(
@@ -276,6 +321,21 @@
             </div>
           {/if}
         </div>
+
+        {#if quickKind(s) && quick[seriesKey(s)]}
+          {@const q = quick[seriesKey(s)]}
+          <div class="quick">
+            <span class="secondary">今の値を記録:</span>
+            <input class="input" type="number" min="0" max="100" step="any" bind:value={q.percent} placeholder="使用率" style="width:84px" aria-label="使用率" />
+            <span class="muted">%</span>
+            <span class="secondary">リセットまで</span>
+            <input class="input" type="number" min="0" step="1" bind:value={q.days} placeholder="0" style="width:56px" aria-label="日" /><span class="muted">日</span>
+            <input class="input" type="number" min="0" step="1" bind:value={q.hours} placeholder="0" style="width:56px" aria-label="時間" /><span class="muted">時間</span>
+            <input class="input" type="number" min="0" max="59" step="1" bind:value={q.minutes} placeholder="0" style="width:56px" aria-label="分" /><span class="muted">分</span>
+            <button class="btn small primary" onclick={() => saveQuick(s)} disabled={q.percent == null}>記録</button>
+            <span class="muted tiny">リセットまでの時間は空欄でも記録できます（入れると枠の開始時刻が正確になります）</span>
+          </div>
+        {/if}
 
         {#if s.points.length > 1}
           <Chart option={chartOption(s)} height={270} />
@@ -436,6 +496,15 @@
   }
   .tiny {
     font-size: 11.5px;
+  }
+  .quick {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0 10px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 8px;
   }
   .stats {
     display: grid;
