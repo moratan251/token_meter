@@ -208,6 +208,70 @@ export interface Settings {
   geo_us_multiplier: number;
   web_search_usd: number;
   theme: "system" | "light" | "dark";
+  manual_limits: ManualLimit[];
+  claude_desktop_usage: boolean;
+}
+
+export type LimitKind = "session" | "weekly" | "weekly_model";
+
+export interface ManualLimit {
+  id: string;
+  service: ServiceId;
+  kind: LimitKind;
+  model: string | null;
+  percent: number;
+  ts: number;
+  resets_at: number | null;
+}
+
+export type LimitSource = "desktop" | "log" | "manual";
+
+export interface LimitPoint {
+  ts: number;
+  percent: number;
+  window_cost: number | null;
+  source: LimitSource;
+}
+
+export interface LimitWindow {
+  start: number | null;
+  end: number | null;
+  max_percent: number;
+  cost: number | null;
+  usd_per_percent: number | null;
+  last_ts: number;
+}
+
+export interface LimitSeries {
+  service: ServiceId;
+  kind: string;
+  model: string | null;
+  window_minutes: number;
+  sources: LimitSource[];
+  latest: LimitPoint | null;
+  latest_resets_at: number | null;
+  usd_per_percent: number | null;
+  basis: "current" | "recent_window" | "average";
+  avg_usd_per_percent: number | null;
+  basis_points: number;
+  basis_intervals: number;
+  basis_cost: number;
+  current_start: number | null;
+  current_end: number | null;
+  current_cost: number | null;
+  current_active: boolean;
+  points: LimitPoint[];
+  windows: LimitWindow[];
+}
+
+export interface LimitReport {
+  series: LimitSeries[];
+  desktop_path: string | null;
+  desktop_exists: boolean;
+  desktop_samples: number;
+  desktop_last_ts: number | null;
+  codex_samples: number;
+  manual_samples: number;
 }
 
 export interface Cycle {

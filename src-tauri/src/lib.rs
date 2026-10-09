@@ -1,3 +1,4 @@
+mod limits;
 mod model;
 mod pricing;
 mod query;
@@ -21,6 +22,7 @@ struct Inner {
     store: Store,
     settings: Settings,
     prices: PriceBook,
+    limits: limits::LimitHistory,
     settings_path: PathBuf,
     data_dir: PathBuf,
 }
@@ -59,7 +61,9 @@ async fn refresh(app: tauri::AppHandle, state: State<'_, AppState>, force: bool)
         let _ = app.emit("scan-progress", Progress { done, total });
     });
     let mut g = lock(&state)?;
-    Ok(g.store.apply_scan(plan, results, &settings))
+    let stats = g.store.apply_scan(plan, results, &settings);
+    g.limits.refresh(&settings);
+    Ok(stats)
 }
 
 #[tauri::command]
@@ -154,6 +158,14 @@ async fn query_table(state: State<'_, AppState>, filter: Filter, group_by: Strin
 async fn subscription_report(state: State<'_, AppState>) -> Res<Vec<query::PlanReport>> {
     let g = lock(&state)?;
     Ok(query::subscription_report(&g.store, &g.prices, &g.settings))
+}
+
+#[tauri::command]
+async fn limit_report(state: State<'_, AppState>) -> Res<limits::LimitReport> {
+    let mut g = lock(&state)?;
+    let settings = g.settings.clone();
+    g.limits.refresh(&settings);
+    Ok(limits::report(&g.store, &g.prices, &g.settings, &g.limits))
 }
 
 #[tauri::command]
@@ -258,6 +270,28 @@ mod real_data {
             println!("  {:<28} ${:>10.2}  {:>14} tok  {:>6} req", g.key, g.agg.total_cost, g.agg.tokens.total(), g.agg.requests);
         }
         println!("unpriced: {:?}", d.unpriced);
+
+        let mut hist = limits::LimitHistory::load(&tmp);
+        hist.refresh(&settings);
+        let rep = limits::report(&store, &book, &settings, &hist);
+        println!("limits: desktop {} samples, codex {} samples", rep.desktop_samples, rep.codex_samples);
+        for s in &rep.series {
+            println!(
+                "  {} {:<10} latest {:?}% per1% {:?} (Δ{:.0}pt / {} intervals, ${:.2}) window_cost {:?} windows {}",
+                s.service,
+                s.kind,
+                s.latest.as_ref().map(|p| p.percent),
+                s.usd_per_percent.map(|v| format!("{v:.2} ({})", s.basis)),
+                s.basis_points,
+                s.basis_intervals,
+                s.basis_cost,
+                s.current_cost.map(|v| v.round()),
+                s.windows.len()
+            );
+            for w in s.windows.iter().take(4) {
+                println!("      window start {:?} max {:.0}% cost {:?}", w.start, w.max_percent, w.cost.map(|v| v.round()));
+            }
+        }
     }
 }
 
@@ -275,6 +309,7 @@ pub fn run() {
                 inner: Mutex::new(Inner {
                     store: Store::new(&data_dir),
                     prices: PriceBook::load(&data_dir),
+                    limits: limits::LimitHistory::load(&data_dir),
                     settings,
                     settings_path,
                     data_dir,
@@ -290,6 +325,7 @@ pub fn run() {
             query_dashboard,
             query_table,
             subscription_report,
+            limit_report,
             get_settings,
             save_settings,
             import_litellm,

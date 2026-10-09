@@ -111,6 +111,7 @@ struct TokenInfo {
 
 #[derive(Deserialize)]
 struct RateLimits {
+    limit_id: Option<String>,
     plan_type: Option<String>,
     primary: Option<RateWin>,
     secondary: Option<RateWin>,
@@ -243,6 +244,29 @@ fn parse_bytes(path: &Path, data: &[u8]) -> ParsedFile {
                             last_plan = Some(p.clone());
                         }
                     }
+                    // 使用率が変わった時点だけを残す（同じ値の繰り返しは捨てる）。
+                    for w in [&rl.primary, &rl.secondary].into_iter().flatten() {
+                        let (Some(pct), Some(win)) = (w.used_percent, w.window_minutes) else {
+                            continue;
+                        };
+                        let resets_at = w.resets_at.map(|s| s * 1000);
+                        let same = pf
+                            .rate_samples
+                            .iter()
+                            .rev()
+                            .find(|s| s.window_minutes == win && s.limit_id == rl.limit_id)
+                            .map(|s| s.used_percent == pct && s.resets_at == resets_at)
+                            .unwrap_or(false);
+                        if !same {
+                            pf.rate_samples.push(RateSample {
+                                ts,
+                                window_minutes: win,
+                                used_percent: pct,
+                                resets_at,
+                                limit_id: rl.limit_id.clone(),
+                            });
+                        }
+                    }
                     pf.rate_limit = Some(RateLimitSnapshot {
                         ts,
                         plan_type: rl.plan_type,
@@ -370,5 +394,8 @@ mod tests {
         assert_eq!(pf.strings[pf.records[2].model as usize], "gpt-5.6-sol");
         assert_eq!(pf.plan_marks, vec![(1790812802000, "plus".to_string())]);
         assert!(pf.rate_limit.is_some());
+        assert_eq!(pf.rate_samples.len(), 1);
+        assert_eq!(pf.rate_samples[0].window_minutes, 300);
+        assert_eq!(pf.rate_samples[0].resets_at, Some(1_790_000_000_000));
     }
 }

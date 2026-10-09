@@ -3,7 +3,7 @@ import type { Money } from "./format";
 import { presetRange, toMillis, type PeriodId } from "./periods";
 import type { BackendFilter, Meta, ServiceId, Settings } from "./types";
 
-export type Page = "dashboard" | "explorer" | "subscription" | "pricing" | "settings";
+export type Page = "dashboard" | "explorer" | "subscription" | "limits" | "pricing" | "settings";
 
 export interface FilterState {
   period: PeriodId;

@@ -27,6 +27,23 @@ pub struct Plan {
     pub end: Option<String>,
 }
 
+/// 手動で記録した使用上限の消費率。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ManualLimit {
+    pub id: String,
+    pub service: String,
+    /// "session"（5時間枠）| "weekly"（週間・すべて）| "weekly_model"（週間・モデル別）
+    pub kind: String,
+    /// `weekly_model` の対象モデル名（例: "fable"）。モデル名にこの文字列を含む使用量を対象にする。
+    #[serde(default)]
+    pub model: Option<String>,
+    pub percent: f64,
+    /// 記録した時刻（UTC ミリ秒）
+    pub ts: i64,
+    #[serde(default)]
+    pub resets_at: Option<i64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -52,6 +69,9 @@ pub struct Settings {
     /// サーバー側の Web 検索 1 回あたりの USD。
     pub web_search_usd: f64,
     pub theme: String,
+    pub manual_limits: Vec<ManualLimit>,
+    /// Claude デスクトップアプリが記録する使用率の履歴を読み込む
+    pub claude_desktop_usage: bool,
 }
 
 impl Default for Settings {
@@ -73,6 +93,8 @@ impl Default for Settings {
             geo_us_multiplier: 1.1,
             web_search_usd: 0.01,
             theme: "system".into(),
+            manual_limits: Vec::new(),
+            claude_desktop_usage: true,
         }
     }
 }

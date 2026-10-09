@@ -6,6 +6,7 @@
     { id: "dashboard", label: "ダッシュボード", icon: "M3 13h4v8H3zM10 3h4v18h-4zM17 8h4v13h-4z" },
     { id: "explorer", label: "明細", icon: "M4 5h16M4 10h16M4 15h16M4 20h10" },
     { id: "subscription", label: "元取り分析", icon: "M4 19 9 13l4 3 7-9M15 7h5v5" },
+    { id: "limits", label: "使用上限", icon: "M4 18a8 8 0 1 1 16 0M12 18l4-6M4 18h16" },
     { id: "pricing", label: "価格表", icon: "M20 12 12 20 4 12V4h8zM8.5 8.5h.01" },
     { id: "settings", label: "設定", icon: "M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7ZM19.4 13a7.6 7.6 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-1.7-1L15 3.5h-4l-.4 2.5a7 7 0 0 0-1.7 1l-2.4-1-2 3.4L6.6 11a7.6 7.6 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 1.7 1l.4 2.5h4l.4-2.5a7 7 0 0 0 1.7-1l2.4 1 2-3.4Z" },
   ];

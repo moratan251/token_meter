@@ -36,6 +36,7 @@ src-tauri/
   src/store.rs           差分スキャン、ファイル単位のキャッシュ、統合と重複排除
   src/pricing.rs         価格情報、LiteLLM の取り込み、金額計算
   src/query.rs           絞り込み、ダッシュボード・明細の集計、プラン料金の按分
+  src/limits.rs          使用上限（%）の履歴の取り込みと、1% あたりの API 換算額の推定
   src/settings.rs        保存される設定（アプリ設定フォルダの JSON）
   src/lib.rs             Tauri コマンド
   resources/curated_prices.json   公式価格で確認済みの Anthropic の単価（100 万トークンあたり USD）
@@ -81,6 +82,25 @@ cargo test --release --lib real_data -- --ignored --nocapture # 実際のロー�
   キーはキャッシュに保存されるため、`DefaultHasher` に変えないでください。
 - 解析結果が変わる修正をしたら `store.rs` の `PARSER_VERSION` を上げてください。既存のファイルは
   再解析され、すでに削除されたファイルの記録はキャッシュのまま残ります。
+
+## 使用上限（%）との比較
+
+- 使用率の取得元は 3 つ。
+  - **Claude**: デスクトップアプリが書く `%APPDATA%\Claude\plan-usage-history.json`
+    （非公開の形式。`{version: 2, samples: [{t, org, u: {fh, sd}}]}`、`fh` = 5 時間枠 %、
+    `sd` = 7 日枠 %）。アプリを開いている間しか記録されず、古いものから消えるので、読み込んだ分を
+    アプリ側の `limit-history.json` に蓄積する。複数アカウントが混ざらないよう最新サンプルの `org` だけ使う。
+  - **Codex**: ログの `rate_limits`（`used_percent`、`window_minutes`、`resets_at` は秒）。
+    使用率が変わった時点だけを `RateSample` として残す。
+  - **手動記録**: 使用量画面のテキストを貼り付けて読み取る（`src/lib/usageParse.ts`）。
+    モデル別の枠（週次・Fable など）はここでしか取れない。
+- 公式に使用率を取れるのは Claude Code のステータスライン入力の `rate_limits`
+  （`five_hour` / `seven_day`、v2.1.80 以降）だけ。OAuth トークンを使う非公開 API は使わない。
+- 推定は「今の枠の API 換算額 ÷ 今の使用率」を基本にし、使えなければ使用率 10% 以上の直近の枠、
+  最後に過去 30 日の区間平均を使う。使用率にはチャットなど Code 以外の利用も含まれるので、
+  1% あたりの額は実際より低く出ることがある。UI では枠ごとの実績と「Code 以外の利用（推定）」を出す。
+- リセット時刻が分からない枠は、使用率の急な低下から開始時刻を推定する。手動記録などでリセット時刻が
+  分かれば、そちらを優先する。
 
 ## 価格
 

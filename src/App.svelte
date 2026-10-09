@@ -4,6 +4,7 @@
   import Dashboard from "./pages/Dashboard.svelte";
   import Explorer from "./pages/Explorer.svelte";
   import Subscription from "./pages/Subscription.svelte";
+  import Limits from "./pages/Limits.svelte";
   import Pricing from "./pages/Pricing.svelte";
   import SettingsPage from "./pages/Settings.svelte";
   import { api, fetchLitellm, fetchUsdJpy, onScanProgress } from "./lib/api";
@@ -98,6 +99,8 @@
       <Explorer />
     {:else if app.page === "subscription"}
       <Subscription />
+    {:else if app.page === "limits"}
+      <Limits />
     {:else if app.page === "pricing"}
       <Pricing />
     {:else}

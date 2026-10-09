@@ -91,7 +91,7 @@ pub fn price_table(st: &Store, book: &PriceBook, settings: &Settings) -> Vec<Opt
         .collect()
 }
 
-fn rec_cost(prices: &[Option<Resolved>], r: &Rec, settings: &Settings) -> Cost {
+pub(crate) fn rec_cost(prices: &[Option<Resolved>], r: &Rec, settings: &Settings) -> Cost {
     prices[r.model as usize]
         .as_ref()
         .map(|p| cost_of(&p.spec, &r.t, r.flags, settings))

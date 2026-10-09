@@ -18,8 +18,42 @@ use crate::sources::{self, SourceDir};
 
 /// 解析結果が変わる修正をしたら上げる。既存のファイルは再解析され、
 /// すでに削除されたファイルの記録はそのまま残る。
-const PARSER_VERSION: u32 = 2;
-const CACHE_FORMAT: u32 = 1;
+const PARSER_VERSION: u32 = 3;
+/// キャッシュの形式。postcard は項目の追加に追従できないので、構造体を変えたら上げて
+/// `legacy` に旧形式の読み込みを追加する（削除済みファイルの履歴を失わないため）。
+const CACHE_FORMAT: u32 = 2;
+
+/// 旧形式のキャッシュ。読み込んで現在の形式に変換するためだけに使う。
+mod legacy {
+    use serde::Deserialize;
+
+    use crate::model::{FileRecord, RateLimitSnapshot, Service};
+
+    #[derive(Deserialize)]
+    pub struct ParsedFileV1 {
+        pub strings: Vec<String>,
+        pub records: Vec<FileRecord>,
+        pub titles: Vec<(String, String)>,
+        pub plan_marks: Vec<(i64, String)>,
+        pub rate_limit: Option<RateLimitSnapshot>,
+    }
+
+    #[derive(Deserialize)]
+    pub struct FileEntryV1 {
+        pub service: Service,
+        pub size: u64,
+        pub mtime: i64,
+        pub missing: bool,
+        pub parser: u32,
+        pub parsed: ParsedFileV1,
+    }
+
+    #[derive(Deserialize)]
+    pub struct CacheFileV1 {
+        pub format: u32,
+        pub files: Vec<(String, FileEntryV1)>,
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -120,6 +154,8 @@ pub struct Store {
     pub titles: HashMap<u32, String>,
     pub plan_marks: Vec<(i64, String)>,
     pub rate_limit: Option<RateLimitSnapshot>,
+    /// Codex の使用率の変化（全ファイル分、時刻順）
+    pub rate_samples: Vec<RateSample>,
     pub last_scan: ScanStats,
     codex_titles: Vec<(String, String)>,
     loaded: bool,
@@ -152,6 +188,7 @@ impl Store {
             titles: HashMap::new(),
             plan_marks: Vec::new(),
             rate_limit: None,
+            rate_samples: Vec::new(),
             last_scan: ScanStats::default(),
             codex_titles: Vec::new(),
             loaded: false,
@@ -161,9 +198,41 @@ impl Store {
     fn load_cache(&mut self) {
         self.loaded = true;
         let Ok(bytes) = std::fs::read(&self.cache_path) else { return };
-        match postcard::from_bytes::<CacheFile>(&bytes) {
-            Ok(c) if c.format == CACHE_FORMAT => {
-                self.files = c.files.into_iter().collect();
+        // 先頭の format だけを読んで形式を判定する。
+        let Ok((format, _)) = postcard::take_from_bytes::<u32>(&bytes) else { return };
+        match format {
+            CACHE_FORMAT => {
+                if let Ok(c) = postcard::from_bytes::<CacheFile>(&bytes) {
+                    self.files = c.files.into_iter().collect();
+                }
+            }
+            1 => {
+                if let Ok(c) = postcard::from_bytes::<legacy::CacheFileV1>(&bytes) {
+                    debug_assert_eq!(c.format, 1);
+                    self.files = c
+                        .files
+                        .into_iter()
+                        .map(|(k, e)| {
+                            let p = e.parsed;
+                            let entry = FileEntry {
+                                service: e.service,
+                                size: e.size,
+                                mtime: e.mtime,
+                                missing: e.missing,
+                                parser: e.parser,
+                                parsed: ParsedFile {
+                                    strings: p.strings,
+                                    records: p.records,
+                                    titles: p.titles,
+                                    plan_marks: p.plan_marks,
+                                    rate_limit: p.rate_limit,
+                                    rate_samples: Vec::new(),
+                                },
+                            };
+                            (k, entry)
+                        })
+                        .collect();
+                }
             }
             _ => {}
         }
@@ -367,6 +436,7 @@ impl Store {
         self.titles.clear();
         self.plan_marks.clear();
         self.rate_limit = None;
+        self.rate_samples.clear();
 
         let active: Vec<&SourceDir> = dirs.iter().filter(|d| d.enabled).collect();
         let mut keys: Vec<&String> = self
@@ -415,7 +485,20 @@ impl Store {
                     self.rate_limit = Some(rl.clone());
                 }
             }
+            self.rate_samples.extend(pf.rate_samples.iter().cloned());
         }
+        // 複数のセッションが並行すると同じ値が何度も出るので、枠ごとに変化点だけ残す。
+        self.rate_samples.sort_by_key(|s| s.ts);
+        let mut last: HashMap<(u64, Option<String>), (f64, Option<i64>)> = HashMap::new();
+        self.rate_samples.retain(|s| {
+            let k = (s.window_minutes, s.limit_id.clone());
+            let v = (s.used_percent, s.resets_at);
+            if last.get(&k) == Some(&v) {
+                return false;
+            }
+            last.insert(k, v);
+            true
+        });
         for (id, name) in &self.codex_titles {
             if let Some(i) = self.sessions.get(id) {
                 self.titles.entry(i).or_insert_with(|| name.clone());

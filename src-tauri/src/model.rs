@@ -114,6 +114,17 @@ pub struct RateLimitSnapshot {
     pub secondary: Option<RateWindow>,
 }
 
+/// ある時点の使用上限の消費率（Codex の `rate_limits` の 1 枠分）。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RateSample {
+    pub ts: i64,
+    pub window_minutes: u64,
+    pub used_percent: f64,
+    /// リセット時刻（UTC ミリ秒）
+    pub resets_at: Option<i64>,
+    pub limit_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ParsedFile {
     pub strings: Vec<String>,
@@ -123,6 +134,8 @@ pub struct ParsedFile {
     /// その時刻に観測されたプラン種別（Codex の `rate_limits.plan_type`）。
     pub plan_marks: Vec<(i64, String)>,
     pub rate_limit: Option<RateLimitSnapshot>,
+    /// 使用率が変化した時点の記録（枠ごと）
+    pub rate_samples: Vec<RateSample>,
 }
 
 impl ParsedFile {
