@@ -13,6 +13,7 @@
     { service: "claude", name: "Claude Max 5x", price: 100, currency: "USD" },
     { service: "claude", name: "Claude Max 20x", price: 200, currency: "USD" },
     { service: "codex", name: "ChatGPT Plus", price: 20, currency: "USD" },
+    { service: "codex", name: "ChatGPT Pro", price: 100, currency: "USD" },
     { service: "codex", name: "ChatGPT Pro", price: 200, currency: "USD" },
   ];
 
@@ -318,7 +319,7 @@
         <div class="field">
           <label for="price">月額</label>
           <div class="row nowrap">
-            <input id="price" class="input" type="number" min="0" step="0.01" bind:value={editing.price} style="width:120px" />
+            <input id="price" class="input" type="number" min="0" step="any" bind:value={editing.price} style="width:120px" />
             <select class="input" bind:value={editing.currency} aria-label="通貨">
               <option value="USD">USD</option>
               <option value="JPY">JPY</option>
