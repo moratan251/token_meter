@@ -90,6 +90,8 @@
     data ? data.fees.reduce((s, f) => s + convert(f.amount, f.currency, m), 0) : 0,
   );
   const apiDisplay = $derived(data ? toDisplay(data.totals.total_cost, m) : 0);
+  // 元取り倍率の分子: プランの契約期間内の利用だけ（契約していない期間の利用で倍率が上がらないように）
+  const planDisplay = $derived(data ? toDisplay(data.plan_cost, m) : 0);
   const delta = $derived(
     data && prevTotal && prevTotal > 0 ? data.totals.total_cost / prevTotal - 1 : null,
   );
@@ -313,18 +315,23 @@
       />
       <StatTile
         label="元取り倍率"
-        value={feeTotal > 0 ? ratio(apiDisplay / feeTotal) : "—"}
+        value={feeTotal > 0 ? ratio(planDisplay / feeTotal) : "—"}
         sub={feeTotal > 0 ? `料金 ${moneyIn(feeTotal, m.currency)}（期間按分）` : "プランを登録すると表示されます"}
       >
         {#if feeTotal > 0}
           <div class="meter" title="料金のうち API 換算で使い切った割合">
-            <div class="fill" style:width="{Math.min(100, (apiDisplay / feeTotal) * 100)}%"></div>
+            <div class="fill" style:width="{Math.min(100, (planDisplay / feeTotal) * 100)}%"></div>
           </div>
           <div class="muted tiny">
-            {apiDisplay >= feeTotal
-              ? `サブスクの方が ${moneyIn(apiDisplay - feeTotal, m.currency)} お得`
-              : `API 従量課金の方が ${moneyIn(feeTotal - apiDisplay, m.currency)} 安い`}
+            {planDisplay >= feeTotal
+              ? `サブスクの方が ${moneyIn(planDisplay - feeTotal, m.currency)} お得`
+              : `API 従量課金の方が ${moneyIn(feeTotal - planDisplay, m.currency)} 安い`}
           </div>
+          {#if data.subset}
+            <div class="muted tiny">絞り込み中: 料金は絞り込めないため参考値です</div>
+          {:else if planDisplay < apiDisplay * 0.995}
+            <div class="muted tiny">プランの契約期間外の {moneyIn(apiDisplay - planDisplay, m.currency)} は除外</div>
+          {/if}
         {:else}
           <button class="btn small" style="align-self:flex-start" onclick={() => (app.page = "subscription")}>プランを登録</button>
         {/if}

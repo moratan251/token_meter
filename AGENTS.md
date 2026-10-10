@@ -85,21 +85,40 @@ cargo test --release --lib real_data -- --ignored --nocapture # 実際のロー�
 
 ## 使用上限（%）との比較
 
-- 使用率の取得元は 3 つ。
+- 使用率の取得元は 4 つ。
   - **Claude**: デスクトップアプリが書く `plan-usage-history.json`。Microsoft Store 版（MSIX）では
     `%LOCALAPPDATA%\Packages\Claude_<発行元ID>\LocalCache\Roaming\Claude\` にあり、
     通常版では `%APPDATA%\Claude\` にあるので両方を探す（`desktop_history_paths`）
     （非公開の形式。`{version: 2, samples: [{t, org, u: {fh, sd}}]}`、`fh` = 5 時間枠 %、
     `sd` = 7 日枠 %）。アプリを開いている間しか記録されず、古いものから消えるので、読み込んだ分を
     アプリ側の `limit-history.json` に蓄積する。複数アカウントが混ざらないよう最新サンプルの `org` だけ使う。
+  - **Claude（ステータスライン）**: 使用上限の画面から `~/.claude/settings.json` の `statusLine` に
+    `resources/statusline.ps1` を設定すると（`limits::install_statusline`）、Claude Code が応答するたびに
+    `~/.claude/token-meter/rate-limits.jsonl` に `{t, fh, fh_reset, sd, sd_reset}`（リセットは Unix 秒）を
+    値が変わったときだけ追記する。他のステータスラインが設定済みなら上書きしない。スクリプトは
+    Windows PowerShell 5.1 で動くように書き、BOM 付きで置く。記録されるのは端末の `claude`（CLI）を
+    使ったときだけで、デスクトップアプリの Code タブではステータスラインが実行されない（2026-10 に確認）。
   - **Codex**: ログの `rate_limits`（`used_percent`、`window_minutes`、`resets_at` は秒）。
     使用率が変わった時点だけを `RateSample` として残す。
   - **手動記録**: 使用量画面のテキストを貼り付けて読み取る（`src/lib/usageParse.ts`）。
     モデル別の枠（週次・Fable など）はここでしか取れない。
 - 公式に使用率を取れるのは Claude Code のステータスライン入力の `rate_limits`
-  （`five_hour` / `seven_day`、v2.1.80 以降）だけ。OAuth トークンを使う非公開 API は使わない。
+  （`five_hour` / `seven_day`。`used_percentage` は小数、`resets_at` は Unix 秒。Pro / Max のみで、
+  セッションの最初の応答の後から入る）だけ。公式ドキュメントに導入バージョンの記載はない
+  （コミュニティの情報では v2.1.80）。OAuth トークンを使う非公開 API は使わない。
+- 枠の区切り（`limits::analyze`）: リセット時刻が分かればそれを使う。分からなければ、3 ポイント以上の
+  低下・0% への低下・枠の長さの経過で区切る。開始時刻が推定の枠は「最初の記録 + 枠の長さ」で必ず終わる。
+  0%（0.5 以下）の記録は「枠が始まっていない」とみなして枠に入れず、次の枠の開始時刻の下限にする。
+  開始時刻は、下限の後の最初の Code の記録の直前（なければ区間の中ほど）とする。実データでは 3 ポイント
+  程度の低下も時刻から見て本当のリセットだったので、低下の判定を緩めないこと。
 - 推定は「今の枠の API 換算額 ÷ 今の使用率」を基本にし、使えなければ使用率 10% 以上の直近の枠、
-  最後に過去 30 日の区間平均を使う。
+  最後に過去 30 日の区間平均を使う。今有効なプランの開始日が 30 日以内なら、それより前のデータは使わない
+  （プランで 1% の重みが変わるため）。
+- Claude の 5 時間枠と週間枠は、両方の使用率がそろった連続する記録から「5 時間枠の 1% が週間枠の何 % か」を
+  求め（`claude_pair_ratio`）、互いの推定を照らし合わせる（`reconcile`）。2.5 倍以上食い違うか片方の信頼度が
+  低ければ、信頼度の高い方（同じなら週間枠）から換算した値を使い、`basis = "cross"` にする。
+- 推定値には信頼度（`quality`）を付ける。Code 分の増加が 10 ポイント未満、Code 以外の比率が高い、
+  最後の記録が古い、などで下げる。
 - 使用率にはチャットなど Code 以外の利用も含まれるので、分母から除く。使用率が上がった区間に
   Code の記録が 1 件もなければ（反映の遅れとして直前の記録の 10 分前まで見る）、その増加を
   「Code 以外」とする。週間枠は 1% 上がるまでに Code とチャットが混ざりやすいので、同じ時間帯の
@@ -140,6 +159,10 @@ WebView2 のデバッグポートを有効にして起動し、CDP で操作し�
 ```bash
 WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333 npm run app:dev
 ```
+
+インストール版の Token Meter が起動していると、WebView2 のデータフォルダが競合して開発版の起動が
+`0x8007139F` で失敗する。インストール版は終了させず、`WEBVIEW2_USER_DATA_FOLDER` に別のフォルダを
+指定して起動する。
 
 `http://127.0.0.1:9333/json` でページを取得でき、Chrome と同じく `Runtime.evaluate` や
 `Page.captureScreenshot` が使えます。

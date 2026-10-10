@@ -3,10 +3,10 @@
   import StatTile from "../components/StatTile.svelte";
   import { api } from "../lib/api";
   import { app, money as moneyCtx, saveSettings, toast } from "../lib/state.svelte";
-  import { SERVICE_LABEL, convert, date, moneyAxis, moneyIn, ratio, toDisplay, ymd } from "../lib/format";
+  import { SERVICE_LABEL, convert, date, money, moneyAxis, moneyIn, ratio, toDisplay, ymd } from "../lib/format";
   import { chrome, serviceColor, theme } from "../lib/colors.svelte";
   import { base, categoryAxis, tipRow, valueAxis } from "../lib/echarts";
-  import type { Plan, PlanReport, ServiceId } from "../lib/types";
+  import type { Cycle, LimitReport, Plan, PlanReport, ServiceId } from "../lib/types";
 
   const PRESETS: { service: ServiceId; name: string; price: number; currency: string }[] = [
     { service: "claude", name: "Claude Pro", price: 20, currency: "USD" },
@@ -18,6 +18,7 @@
   ];
 
   let reports = $state<PlanReport[]>([]);
+  let limits = $state<LimitReport | null>(null);
   let editing = $state<Plan | null>(null);
   let isNew = $state(false);
 
@@ -27,7 +28,24 @@
     app.dataVersion;
     app.settings;
     api.subscriptions().then((r) => (reports = r)).catch((e) => toast(String(e), "error"));
+    // 使用上限の推定は補助的な表示なので、取れなくてもエラーにしない。
+    api.limits().then((r) => (limits = r)).catch((e) => console.warn(e));
   });
+
+  /**
+   * 使用上限から見た、このサイクルで使える最大の API 換算額（毎週の週間枠を 100% 使い切った場合）。
+   * 1% あたりの額は「使用上限との比較」と同じ推定値を使う。
+   */
+  function limitValue(r: PlanReport, cy: Cycle) {
+    const s = limits?.series.find(
+      (x) => x.service === r.plan.service && x.kind === "weekly" && x.model == null && x.usd_per_percent != null,
+    );
+    if (!s || s.usd_per_percent == null) return null;
+    const weeks = (cy.end - cy.start) / (7 * 86_400_000);
+    return { max: toDisplay(s.usd_per_percent * 100 * weeks, m), per: s.usd_per_percent, quality: s.quality.level };
+  }
+
+  const QUALITY_LABEL = { good: "高", fair: "中", poor: "低" } as const;
 
   /**
    * ログが残っている期間だけで料金と API 換算額を比べる。Claude Code は古いログを
@@ -48,9 +66,13 @@
         cut = true;
         continue;
       }
-      const share = cy.start < first ? (cy.end - first) / (cy.end - cy.start) : 1;
-      if (share < 1) cut = true;
-      fee += cy.fee * share;
+      // ログが残っている期間の分だけ料金を数える。進行中のサイクルは、API 換算額が
+      // 今までの分なので、料金も経過した分だけにする。
+      const len = cy.end - cy.start;
+      const from = Math.max(cy.start, first);
+      const to = cy.current ? cy.start + cy.elapsed * len : cy.end;
+      if (from > cy.start) cut = true;
+      fee += cy.fee * Math.max(0, (to - from) / len);
       cost += cy.cost;
     }
     return { fee: convert(fee, r.plan.currency, m), cost: toDisplay(cost, m), cut, first, noLog };
@@ -353,7 +375,7 @@
       <StatTile
         label="累計 支払額"
         value={moneyIn(summary.fee, m.currency)}
-        sub={summary.cut ? "ログが残っている期間の分のみ" : "登録プランの請求サイクル合計"}
+        sub={summary.cut ? "ログが残っている期間の分のみ（進行中のサイクルは経過分）" : "請求サイクルの合計（進行中のサイクルは経過分）"}
       />
       <StatTile label="累計 API換算額" value={moneyIn(summary.cost, m.currency)} sub="同じ期間・同じサービス" />
       <StatTile label="元取り倍率" value={summary.fee > 0 ? ratio(summary.cost / summary.fee) : "—"} sub="API換算額 ÷ 支払額" />
@@ -402,6 +424,19 @@
                 <div class="big">{moneyIn(proj, m.currency)}</div>
                 <div class="muted tiny">予測倍率 {fee > 0 ? ratio(proj / fee) : "—"}</div>
               </div>
+              {@const lim = limitValue(r, cy)}
+              {#if lim && lim.max > 0}
+                <div>
+                  <div class="muted tiny">毎週の上限まで使い切った場合（このサイクル）</div>
+                  <div class="big">{moneyIn(lim.max, m.currency)}</div>
+                  <div class="muted tiny">
+                    料金の {fee > 0 ? ratio(lim.max / fee) : "—"}・今のペースでの使い切り率 {Math.round((proj / lim.max) * 100)}%
+                  </div>
+                  <div class="muted tiny">
+                    週間枠の 1% ≈ {money(lim.per, m)}（信頼度 {QUALITY_LABEL[lim.quality]}）から計算。チャットなど Code 以外の利用分は API 換算額に入りません
+                  </div>
+                </div>
+              {/if}
             {/if}
           </div>
           <div class="charts">

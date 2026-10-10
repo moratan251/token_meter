@@ -68,6 +68,8 @@ export interface Dashboard {
   range_from: number;
   range_to: number;
   fees: PlanFee[];
+  plan_cost: number;
+  subset: boolean;
 }
 
 export interface Row {
@@ -179,6 +181,7 @@ export interface Meta {
   snapshot_date: string;
   last_scan: ScanStats;
   data_dir: string;
+  settings_warning: string | null;
 }
 
 export interface Plan {
@@ -224,7 +227,7 @@ export interface ManualLimit {
   resets_at: number | null;
 }
 
-export type LimitSource = "desktop" | "log" | "manual";
+export type LimitSource = "desktop" | "statusline" | "log" | "manual";
 
 export interface LimitPoint {
   ts: number;
@@ -236,6 +239,7 @@ export interface LimitPoint {
 export interface LimitWindow {
   start: number | null;
   end: number | null;
+  exact: boolean;
   max_percent: number;
   cost: number | null;
   other_percent: number;
@@ -254,7 +258,12 @@ export interface LimitSeries {
   latest_resets_at: number | null;
   usd_per_percent: number | null;
   raw_usd_per_percent: number | null;
-  basis: "current" | "recent_window" | "average";
+  basis: LimitBasis;
+  own_usd_per_percent: number | null;
+  own_basis: LimitBasis;
+  cross_usd_per_percent: number | null;
+  pair_ratio: number | null;
+  quality: LimitQuality;
   avg_usd_per_percent: number | null;
   raw_avg_usd_per_percent: number | null;
   basis_points: number;
@@ -265,8 +274,35 @@ export interface LimitSeries {
   current_end: number | null;
   current_cost: number | null;
   current_active: boolean;
+  estimated_percent: number | null;
+  estimated_new_window: boolean;
+  plan_start: number | null;
   points: LimitPoint[];
   windows: LimitWindow[];
+}
+
+export type LimitBasis = "current" | "recent_window" | "average" | "cross";
+
+export type QualityNote =
+  | "no_data"
+  | "few_points"
+  | "mostly_other"
+  | "some_other"
+  | "stale"
+  | "inconsistent"
+  | "from_other";
+
+export interface LimitQuality {
+  level: "good" | "fair" | "poor";
+  notes: QualityNote[];
+  rounding: number | null;
+}
+
+export interface StatuslineStatus {
+  installed: boolean;
+  other_command: string | null;
+  settings_path: string | null;
+  log_path: string | null;
 }
 
 export interface LimitReport {
@@ -275,6 +311,9 @@ export interface LimitReport {
   desktop_exists: boolean;
   desktop_samples: number;
   desktop_last_ts: number | null;
+  statusline: StatuslineStatus;
+  statusline_samples: number;
+  statusline_last_ts: number | null;
   codex_samples: number;
   manual_samples: number;
 }

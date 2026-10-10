@@ -13,6 +13,8 @@
 
   const DAY = 86_400_000;
   let ready = $state(false);
+  // 設定ファイルを読めなかったときの警告を閉じたか
+  let warningClosed = $state(false);
 
   // テーマ: 明示的な設定を優先し、"system" のときは OS の設定に追従する。
   const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -84,6 +86,13 @@
 <div class="shell">
   <Sidebar />
   <main>
+    {#if ready && app.meta?.settings_warning && !warningClosed}
+      <div class="banner settings-warning" role="alert">
+        <span>{app.meta.settings_warning}</span>
+        <span class="spacer"></span>
+        <button class="btn small" onclick={() => (warningClosed = true)}>閉じる</button>
+      </div>
+    {/if}
     {#if !ready}
       <div class="loading">
         <div class="spinner"></div>
@@ -158,6 +167,9 @@
     border-radius: 8px;
     padding: 10px 14px;
     z-index: 100;
+  }
+  .settings-warning {
+    margin: 12px 24px 0;
   }
   .toast.error {
     border-left-color: var(--critical);

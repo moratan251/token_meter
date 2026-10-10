@@ -25,6 +25,8 @@ struct Inner {
     limits: limits::LimitHistory,
     settings_path: PathBuf,
     data_dir: PathBuf,
+    /// 起動時に設定ファイルを読めなかったときの警告（画面に一度だけ出す）
+    settings_warning: Option<String>,
 }
 
 struct AppState {
@@ -101,6 +103,7 @@ struct Meta {
     snapshot_date: &'static str,
     last_scan: ScanStats,
     data_dir: String,
+    settings_warning: Option<String>,
 }
 
 #[tauri::command]
@@ -139,6 +142,7 @@ async fn get_meta(state: State<'_, AppState>) -> Res<Meta> {
         snapshot_date: g.prices.snapshot_date(),
         last_scan: g.store.last_scan.clone(),
         data_dir: g.data_dir.to_string_lossy().to_string(),
+        settings_warning: g.settings_warning.clone(),
     })
 }
 
@@ -168,6 +172,17 @@ async fn limit_report(state: State<'_, AppState>) -> Res<limits::LimitReport> {
     Ok(limits::report(&g.store, &g.prices, &g.settings, &g.limits))
 }
 
+/// Claude Code のステータスラインに使用率を記録するスクリプトを設定する。
+#[tauri::command]
+async fn install_statusline() -> Res<limits::StatuslineStatus> {
+    limits::install_statusline()
+}
+
+#[tauri::command]
+async fn uninstall_statusline() -> Res<limits::StatuslineStatus> {
+    limits::uninstall_statusline()
+}
+
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> Res<Settings> {
     Ok(lock(&state)?.settings.clone())
@@ -178,6 +193,7 @@ async fn save_settings(state: State<'_, AppState>, settings: Settings) -> Res<Se
     let mut g = lock(&state)?;
     settings.save(&g.settings_path)?;
     g.settings = settings;
+    g.settings_warning = None;
     Ok(g.settings.clone())
 }
 
@@ -232,6 +248,11 @@ async fn price_catalog(state: State<'_, AppState>) -> Res<Vec<CatalogEntry>> {
 
 #[tauri::command]
 async fn write_text_file(path: String, contents: String) -> Res<()> {
+    // 書き出し（CSV など）専用。保存ダイアログを通さない呼び出しで他のファイルを上書きしないよう、拡張子を限る。
+    let lower = path.to_lowercase();
+    if ![".csv", ".json", ".txt"].iter().any(|e| lower.ends_with(e)) {
+        return Err("書き出せるのは .csv / .json / .txt のファイルだけです".into());
+    }
     // Excel は BOM 付きでないと UTF-8 の CSV を正しく開けない。
     let mut data = Vec::with_capacity(contents.len() + 3);
     if path.to_lowercase().ends_with(".csv") {
@@ -274,15 +295,24 @@ mod real_data {
         let mut hist = limits::LimitHistory::load(&tmp);
         hist.refresh(&settings);
         let rep = limits::report(&store, &book, &settings, &hist);
-        println!("limits: desktop {} samples, codex {} samples", rep.desktop_samples, rep.codex_samples);
+        println!(
+            "limits: desktop {} samples, statusline {} samples, codex {} samples",
+            rep.desktop_samples, rep.statusline_samples, rep.codex_samples
+        );
         for s in &rep.series {
             println!(
-                "  {} {:<10} latest {:?}% per1% {:?} raw {:?} (Δ{:.0}pt + other {:.0}pt / {} intervals, ${:.2}) window_cost {:?} windows {}",
+                "  {} {:<10} latest {:?}% active {} est {:?} per1% {:?} own {:?} cross {:?} ratio {:?} quality {} {:?} (Δ{:.0}pt + other {:.0}pt / {} intervals, ${:.2}) window_cost {:?} windows {}",
                 s.service,
                 s.kind,
                 s.latest.as_ref().map(|p| p.percent),
+                s.current_active,
+                s.estimated_percent.map(|v| (v * 10.0).round() / 10.0),
                 s.usd_per_percent.map(|v| format!("{v:.2} ({})", s.basis)),
-                s.raw_usd_per_percent.map(|v| format!("{v:.2}")),
+                s.own_usd_per_percent.map(|v| format!("{v:.2} ({})", s.own_basis)),
+                s.cross_usd_per_percent.map(|v| format!("{v:.2}")),
+                s.pair_ratio.map(|v| format!("{v:.3}")),
+                s.quality.level,
+                s.quality.notes,
                 s.basis_points,
                 s.other_points,
                 s.basis_intervals,
@@ -290,10 +320,11 @@ mod real_data {
                 s.current_cost.map(|v| v.round()),
                 s.windows.len()
             );
-            for w in s.windows.iter().take(4) {
+            for w in s.windows.iter().take(6) {
                 println!(
-                    "      window start {:?} max {:.0}% other {:.0}% cost {:?} per1% {:?}",
-                    w.start,
+                    "      window {} 〜 {} max {:.0}% other {:.0}% cost {:?} per1% {:?}",
+                    w.start.map(fmt_ts).unwrap_or_else(|| "?".into()),
+                    w.end.map(fmt_ts).unwrap_or_else(|| "?".into()),
                     w.max_percent,
                     w.other_percent,
                     w.cost.map(|v| v.round()),
@@ -301,6 +332,15 @@ mod real_data {
                 );
             }
         }
+    }
+
+    fn fmt_ts(ts: i64) -> String {
+        use chrono::TimeZone;
+        chrono::Local
+            .timestamp_millis_opt(ts)
+            .single()
+            .map(|d| d.format("%m-%d %H:%M").to_string())
+            .unwrap_or_default()
     }
 }
 
@@ -313,7 +353,7 @@ pub fn run() {
             let config_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let settings_path = config_dir.join("settings.json");
-            let settings = Settings::load(&settings_path);
+            let (settings, settings_warning) = Settings::load(&settings_path);
             app.manage(AppState {
                 inner: Mutex::new(Inner {
                     store: Store::new(&data_dir),
@@ -322,6 +362,7 @@ pub fn run() {
                     settings,
                     settings_path,
                     data_dir,
+                    settings_warning,
                 }),
                 scan_lock: Mutex::new(()),
             });
@@ -335,6 +376,8 @@ pub fn run() {
             query_table,
             subscription_report,
             limit_report,
+            install_statusline,
+            uninstall_statusline,
             get_settings,
             save_settings,
             import_litellm,

@@ -10,6 +10,7 @@ import type {
   Row,
   ScanStats,
   Settings,
+  StatuslineStatus,
 } from "./types";
 
 export const api = {
@@ -21,6 +22,8 @@ export const api = {
   table: (filter: BackendFilter, groupBy: string) => invoke<Row[]>("query_table", { filter, groupBy }),
   subscriptions: () => invoke<PlanReport[]>("subscription_report"),
   limits: () => invoke<LimitReport>("limit_report"),
+  installStatusline: () => invoke<StatuslineStatus>("install_statusline"),
+  uninstallStatusline: () => invoke<StatuslineStatus>("uninstall_statusline"),
   getSettings: () => invoke<Settings>("get_settings"),
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
   importLitellm: (text: string) => invoke<{ models: number; fetched_at: string }>("import_litellm", { text }),

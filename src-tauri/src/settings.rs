@@ -100,11 +100,25 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn load(path: &Path) -> Settings {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+    /// 設定を読み込む。読めない・壊れている場合は既定値を返し、元のファイルを別名で残して
+    /// 警告を返す（そのまま既定値で保存すると、プランや手動記録が消えてしまうため）。
+    pub fn load(path: &Path) -> (Settings, Option<String>) {
+        let text = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default(), None),
+            Err(e) => {
+                let backup = backup_broken(path);
+                return (Settings::default(), Some(load_warning(&e.to_string(), backup.as_deref())));
+            }
+        };
+        let text = text.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&text);
+        match serde_json::from_slice(text) {
+            Ok(s) => (s, None),
+            Err(e) => {
+                let backup = backup_broken(path);
+                (Settings::default(), Some(load_warning(&e.to_string(), backup.as_deref())))
+            }
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -116,8 +130,84 @@ impl Settings {
     }
 }
 
+/// 壊れた設定ファイルを `settings.broken-<日時>.json` という名前でコピーして残す。
+fn backup_broken(path: &Path) -> Option<String> {
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    let backup = path.with_file_name(format!("{stem}.broken-{stamp}.json"));
+    std::fs::copy(path, &backup).ok()?;
+    Some(backup.to_string_lossy().to_string())
+}
+
+fn load_warning(err: &str, backup: Option<&str>) -> String {
+    match backup {
+        Some(b) => format!("設定ファイルを読み込めなかったため、既定の設定で起動しました（{err}）。元のファイルは {b} に残しています。"),
+        None => format!("設定ファイルを読み込めなかったため、既定の設定で起動しました（{err}）。"),
+    }
+}
+
+/// 一時ファイルに書いてディスクに反映してから置き換える。一時ファイル名は書き込みごとに変え、
+/// 同時に保存しても互いの一時ファイルを壊さないようにする。
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, data).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}-{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broken_settings_are_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("token-meter-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+
+        // ファイルがなければ警告なしで既定値
+        let (s, w) = Settings::load(&path);
+        assert!(w.is_none());
+        assert!(s.plans.is_empty());
+
+        // 保存した内容は読み戻せる（BOM 付きでも読める）
+        let mut s = Settings::default();
+        s.currency = "USD".into();
+        s.save(&path).unwrap();
+        let mut bom = b"\xEF\xBB\xBF".to_vec();
+        bom.extend(std::fs::read(&path).unwrap());
+        std::fs::write(&path, bom).unwrap();
+        let (s, w) = Settings::load(&path);
+        assert!(w.is_none());
+        assert_eq!(s.currency, "USD");
+
+        // 壊れていれば既定値で起動し、元のファイルを残す
+        std::fs::write(&path, b"{ \"plans\": [ broken").unwrap();
+        let (s, w) = Settings::load(&path);
+        assert!(w.is_some());
+        assert_eq!(s.currency, "JPY");
+        let kept = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("settings.broken-"));
+        assert!(kept);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

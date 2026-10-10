@@ -138,7 +138,7 @@ pub fn local_to_ts(ndt: NaiveDateTime) -> i64 {
         .unwrap_or_else(|| ndt.and_utc().timestamp_millis())
 }
 
-fn date_ts(d: NaiveDate) -> i64 {
+pub(crate) fn date_ts(d: NaiveDate) -> i64 {
     local_to_ts(d.and_hms_opt(0, 0, 0).unwrap())
 }
 
@@ -269,6 +269,10 @@ pub struct Dashboard {
     pub range_from: i64,
     pub range_to: i64,
     pub fees: Vec<PlanFee>,
+    /// 登録したプランの契約期間内の API 換算額（元取り倍率の分子。契約していない期間の利用は除く）
+    pub plan_cost: f64,
+    /// モデル・プロジェクト・セッションなどで絞り込んでいる（料金は絞り込めないので倍率は参考値）
+    pub subset: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -474,6 +478,24 @@ pub fn dashboard(st: &Store, book: &PriceBook, settings: &Settings, f: &Filter, 
         .filter(|p| p.amount > 0.0)
         .collect();
 
+    // 元取り倍率の分子は、プランの契約期間内の利用だけにする。
+    let plan_spans: Vec<(Service, i64, i64)> = settings
+        .plans
+        .iter()
+        .filter_map(|p| {
+            let svc = Service::from_id(&p.service)?;
+            let start = date_ts(parse_date(&p.start)?);
+            let end = p.end.as_deref().and_then(parse_date).map(date_ts).unwrap_or(i64::MAX);
+            Some((svc, start, end))
+        })
+        .collect();
+    let plan_cost: f64 = matching
+        .iter()
+        .filter(|r| plan_spans.iter().any(|&(s, a, b)| s == r.service && r.ts >= a && r.ts < b))
+        .map(|r| rec_cost(&prices, r, settings).total())
+        .sum();
+    let subset = !f.models.is_empty() || !f.projects.is_empty() || !f.sessions.is_empty() || f.exclude_subagents;
+
     Dashboard {
         totals,
         subagent_cost,
@@ -492,6 +514,8 @@ pub fn dashboard(st: &Store, book: &PriceBook, settings: &Settings, f: &Filter, 
         range_from: span_from,
         range_to: span_to,
         fees,
+        plan_cost,
+        subset,
     }
 }
 
