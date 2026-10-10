@@ -4,10 +4,10 @@
   import ManualLimitList from "../components/ManualLimitList.svelte";
   import { api } from "../lib/api";
   import { app, money as moneyCtx, saveSettings, toast } from "../lib/state.svelte";
-  import { SERVICE_LABEL, convert, date, dateTime, money, moneyAxis, moneyIn, ratio, relative, toDisplay, ymd } from "../lib/format";
+  import { SERVICE_LABEL, convert, date, dateTime, pad, money, moneyAxis, moneyIn, ratio, relative, toDisplay, ymd } from "../lib/format";
   import { chrome, serviceColor, theme } from "../lib/colors.svelte";
   import { base, categoryAxis, tipRow, valueAxis } from "../lib/echarts";
-  import { parseUsageText } from "../lib/usageParse";
+  import { parseUsageText, resolveResetTime } from "../lib/usageParse";
   import type {
     LimitBasis,
     LimitKind,
@@ -350,9 +350,64 @@
     );
   }
 
-  // 各カードの「今の値を記録」欄の入力値（系列ごと）
-  type Quick = { percent: number | null; days: number | null; hours: number | null; minutes: number | null };
+  // 各カードの「今の値を記録」欄の入力値（系列ごと）。リセットは残り時間か、Claude の表示どおりの曜日・時刻で入れる。
+  type Quick = {
+    percent: number | null;
+    mode: "duration" | "clock";
+    days: number | null;
+    hours: number | null;
+    minutes: number | null;
+    /** "" = 曜日なし、"today" = 今日、"0"〜"6" = 日曜〜土曜 */
+    weekday: string;
+    /** "HH:MM" */
+    time: string;
+  };
   let quick = $state<Record<string, Quick>>({});
+
+  /** 週間枠は Claude が「8:00 (土)」と曜日・時刻で表示するので、既定でその形で入力する。 */
+  function emptyQuick(kind: string, mode?: Quick["mode"]): Quick {
+    return {
+      percent: null,
+      mode: mode ?? (kind === "session" ? "duration" : "clock"),
+      days: null,
+      hours: null,
+      minutes: null,
+      weekday: "",
+      time: "",
+    };
+  }
+
+  const WEEKDAY = "日月火水木金土";
+
+  /** 曜日の選択肢（明日から 7 日分の順に並べ、最後に今日） */
+  function weekdayOptions(): { value: string; label: string }[] {
+    const today = new Date();
+    const opts = [];
+    for (let i = 1; i <= 7; i++) {
+      const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() + i);
+      opts.push({ value: String(d.getDay()), label: `${WEEKDAY[d.getDay()]}曜（${d.getMonth() + 1}/${d.getDate()}）` });
+    }
+    opts.push({ value: "today", label: `今日（${today.getMonth() + 1}/${today.getDate()}）` });
+    return opts;
+  }
+
+  /** 入力されたリセット時刻。空欄なら at = null。 */
+  function quickReset(q: Quick, now: number): { at: number | null } | { error: string } {
+    if (q.mode === "duration") {
+      if (q.days == null && q.hours == null && q.minutes == null) return { at: null };
+      return { at: now + ((q.days ?? 0) * 1440 + (q.hours ?? 0) * 60 + (q.minutes ?? 0)) * 60000 };
+    }
+    if (!q.time) return q.weekday ? { error: "時刻を入力してください" } : { at: null };
+    const [h, mi] = q.time.split(":").map(Number);
+    const wd = q.weekday === "" ? null : q.weekday === "today" ? "today" : Number(q.weekday);
+    const t = resolveResetTime(wd, h, mi, new Date(now));
+    return t ? { at: t.getTime() } : { error: "リセット時刻が過ぎています" };
+  }
+
+  function resetPreview(at: number): string {
+    const d = new Date(at);
+    return `${d.getMonth() + 1}/${d.getDate()}（${WEEKDAY[d.getDay()]}）${pad(d.getHours())}:${pad(d.getMinutes())}（${durationText(at - Date.now())}）`;
+  }
 
   const seriesKey = (s: LimitSeries) => `${s.service}|${s.kind}|${s.model ?? ""}`;
 
@@ -363,9 +418,9 @@
 
   // 描画中に状態を書き換えられないので、系列が増えたときに入力欄の初期値を用意しておく。
   $effect(() => {
-    const keys = (report?.series ?? []).map(seriesKey);
+    const series = report?.series ?? [];
     untrack(() => {
-      for (const k of keys) if (!quick[k]) quick[k] = { percent: null, days: null, hours: null, minutes: null };
+      for (const s of series) if (!quick[seriesKey(s)]) quick[seriesKey(s)] = emptyQuick(s.kind);
     });
   });
 
@@ -378,8 +433,11 @@
       return;
     }
     const now = Date.now();
-    const hasReset = q.days != null || q.hours != null || q.minutes != null;
-    const mins = (q.days ?? 0) * 1440 + (q.hours ?? 0) * 60 + (q.minutes ?? 0);
+    const reset = quickReset(q, now);
+    if ("error" in reset) {
+      toast(reset.error, "error");
+      return;
+    }
     const rec: ManualLimit = {
       id: crypto.randomUUID(),
       service: s.service,
@@ -387,10 +445,10 @@
       model: kind === "weekly_model" ? s.model : null,
       percent: Number(q.percent),
       ts: now,
-      resets_at: hasReset ? now + mins * 60000 : null,
+      resets_at: reset.at,
     };
     await saveSettings({ ...app.settings, manual_limits: [...app.settings.manual_limits, rec] });
-    quick[seriesKey(s)] = { percent: null, days: null, hours: null, minutes: null };
+    quick[seriesKey(s)] = emptyQuick(kind, q.mode);
     toast(`${kindLabel(s)} を ${pct(rec.percent)} で記録しました`);
   }
 
@@ -499,16 +557,38 @@
 
         {#if quickKind(s) && quick[seriesKey(s)]}
           {@const q = quick[seriesKey(s)]}
+          {@const r = quickReset(q, Date.now())}
           <div class="quick">
             <span class="secondary">今の値を記録:</span>
             <input class="input" type="number" min="0" max="100" step="any" bind:value={q.percent} placeholder="使用率" style="width:84px" aria-label="使用率" />
             <span class="muted">%</span>
-            <span class="secondary">リセットまで</span>
-            <input class="input" type="number" min="0" step="1" bind:value={q.days} placeholder="0" style="width:56px" aria-label="日" /><span class="muted">日</span>
-            <input class="input" type="number" min="0" step="1" bind:value={q.hours} placeholder="0" style="width:56px" aria-label="時間" /><span class="muted">時間</span>
-            <input class="input" type="number" min="0" max="59" step="1" bind:value={q.minutes} placeholder="0" style="width:56px" aria-label="分" /><span class="muted">分</span>
+            <div class="seg" role="group" aria-label="リセットの入力方法">
+              <button class:on={q.mode === "duration"} onclick={() => (q.mode = "duration")}>リセットまで</button>
+              <button class:on={q.mode === "clock"} onclick={() => (q.mode = "clock")}>リセット日時</button>
+            </div>
+            {#if q.mode === "duration"}
+              <input class="input" type="number" min="0" step="1" bind:value={q.days} placeholder="0" style="width:56px" aria-label="日" /><span class="muted">日</span>
+              <input class="input" type="number" min="0" step="1" bind:value={q.hours} placeholder="0" style="width:56px" aria-label="時間" /><span class="muted">時間</span>
+              <input class="input" type="number" min="0" max="59" step="1" bind:value={q.minutes} placeholder="0" style="width:56px" aria-label="分" /><span class="muted">分</span>
+            {:else}
+              <select class="input" bind:value={q.weekday} aria-label="曜日">
+                <option value="">曜日なし</option>
+                {#each weekdayOptions() as o (o.value)}
+                  <option value={o.value}>{o.label}</option>
+                {/each}
+              </select>
+              <input class="input" type="time" bind:value={q.time} aria-label="時刻" />
+            {/if}
             <button class="btn small primary" onclick={() => saveQuick(s)} disabled={q.percent == null}>記録</button>
-            <span class="muted tiny">リセットまでの時間は空欄でも記録できます（入れると枠の開始時刻が正確になります）</span>
+            {#if "error" in r}
+              <span class="tiny danger-text">{r.error}</span>
+            {:else if r.at != null && q.mode === "clock"}
+              <span class="muted tiny">リセット: {resetPreview(r.at)}</span>
+            {:else}
+              <span class="muted tiny">
+                {q.mode === "clock" ? "Claude の表示（例: 8:00 (土)にリセット）どおりに入れます。曜日なしは 24 時間以内のその時刻です。" : ""}リセットは空欄でも記録できます（入れると枠の開始時刻が正確になります）
+              </span>
+            {/if}
           </div>
           {@const own = manualOf(s)}
           {#if own.length > 0}
@@ -574,7 +654,7 @@
     <p class="muted tiny">
       Claude デスクトップアプリの「プランの使用量上限」や claude.ai の使用量ページ、Claude Code の <code>/usage</code> の内容をそのまま貼り付けると読み取ります。モデル別の枠（週次・Fable など）はここで記録してください。
     </p>
-    <textarea class="input paste" bind:value={paste} placeholder={"例:\nセッションの上限 4時間20分後にリセット 5%\n週間・すべてのモデル 21時間50分後にリセット 42%\n週次・Fable 21時間50分後にリセット 20%"}></textarea>
+    <textarea class="input paste" bind:value={paste} placeholder={"例:\nセッションの上限 4時間20分後にリセット 5%\n週間・すべてのモデル 8:00 (土)にリセット 42%\n週次・Fable 8:00 (土)にリセット 20%"}></textarea>
     <div class="row">
       <button class="btn" onclick={readPaste} disabled={!paste.trim()}>読み取る</button>
       <button class="btn ghost" onclick={addRow}>＋ 手入力の行を追加</button>
@@ -734,6 +814,9 @@
     padding: 4px 0 10px;
     border-bottom: 1px solid var(--border);
     margin-bottom: 8px;
+  }
+  .danger-text {
+    color: var(--critical);
   }
   .stats {
     display: grid;
